@@ -1223,7 +1223,7 @@ int RGWRados::unwatch(uint64_t watch_handle)
     ldout(cct, 0) << "ERROR: rados->unwatch2() returned r=" << r << dendl;
     return r;
   }
-  r = rados->watch_flush();
+  r = get_rados_handle()->watch_flush();
   if (r < 0) {
     ldout(cct, 0) << "ERROR: rados->watch_flush() returned r=" << r << dendl;
     return r;
@@ -1431,22 +1431,49 @@ void RGWRados::finalize()
  */
 int RGWRados::init_rados()
 {
-  int ret;
+  int ret = 0;
 
-  rados = new Rados();
-  if (!rados)
-    return -ENOMEM;
+  num_rados_handles = cct->_conf->rgw_num_rados_handles;
 
-  ret = rados->init_with_context(cct);
-  if (ret < 0)
-   return ret;
+  rados = new librados::Rados *[num_rados_handles];
+  if (!rados) {
+    ret = -ENOMEM;
+    return ret;
+  }
 
-  ret = rados->connect();
-  if (ret < 0)
-   return ret;
+  for (int i=0; i < num_rados_handles; i++) {
+
+    rados[i] = new Rados();
+    if (!rados[i]) {
+      ret = -ENOMEM;
+      goto fail;
+    }
+
+    ret = rados[i]->init_with_context(cct);
+    if (ret < 0) {
+      goto fail;
+    }
+
+    ret = rados[i]->connect();
+    if (ret < 0) {
+      goto fail;
+    }
+  }
 
   meta_mgr = new RGWMetadataManager(cct, this);
   data_log = new RGWDataChangesLog(cct, this);
+
+  return ret;
+
+fail:
+  for (int i=0; i < num_rados_handles; i++) {
+    if (rados[i]) {
+      delete rados[i];
+    }
+  }
+  if (rados) {
+    delete[] rados;
+  }
 
   return ret;
 }
@@ -1654,6 +1681,7 @@ int RGWRados::open_root_pool_ctx()
 {
   const string& pool = zone.domain_root.name;
   const char *pool_str = pool.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(pool_str, root_pool_ctx);
   if (r == -ENOENT) {
     r = rados->pool_create(pool_str);
@@ -1671,6 +1699,7 @@ int RGWRados::open_root_pool_ctx()
 int RGWRados::open_gc_pool_ctx()
 {
   const char *gc_pool = zone.gc_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(gc_pool, gc_pool_ctx);
   if (r == -ENOENT) {
     r = rados->pool_create(gc_pool);
@@ -1688,6 +1717,7 @@ int RGWRados::open_gc_pool_ctx()
 int RGWRados::init_watch()
 {
   const char *control_pool = zone.control_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(control_pool, control_pool_ctx);
   if (r == -ENOENT) {
     r = rados->pool_create(control_pool);
@@ -1752,6 +1782,7 @@ void RGWRados::pick_control_oid(const string& key, string& notify_oid)
 
 int RGWRados::open_bucket_pool_ctx(const string& bucket_name, const string& pool, librados::IoCtx&  io_ctx)
 {
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(pool.c_str(), io_ctx);
   if (r != -ENOENT)
     return r;
@@ -1853,6 +1884,7 @@ int RGWRados::log_list_init(const string& prefix, RGWAccessHandle *handle)
 {
   log_list_state *state = new log_list_state;
   const char *log_pool = zone.log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(log_pool, state->io_ctx);
   if (r < 0) {
     delete state;
@@ -1888,6 +1920,7 @@ int RGWRados::log_remove(const string& name)
 {
   librados::IoCtx io_ctx;
   const char *log_pool = zone.log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(log_pool, io_ctx);
   if (r < 0)
     return r;
@@ -1908,6 +1941,7 @@ int RGWRados::log_show_init(const string& name, RGWAccessHandle *handle)
 {
   log_show_state *state = new log_show_state;
   const char *log_pool = zone.log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(log_pool, state->io_ctx);
   if (r < 0) {
     delete state;
@@ -2128,6 +2162,7 @@ int RGWRados::time_log_add(const string& oid, const utime_t& ut, const string& s
   librados::IoCtx io_ctx;
 
   const char *log_pool = zone.log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(log_pool, io_ctx);
   if (r == -ENOENT) {
     rgw_bucket pool(log_pool);
@@ -2153,6 +2188,7 @@ int RGWRados::time_log_add(const string& oid, list<cls_log_entry>& entries)
   librados::IoCtx io_ctx;
 
   const char *log_pool = zone.log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(log_pool, io_ctx);
   if (r == -ENOENT) {
     rgw_bucket pool(log_pool);
@@ -2182,6 +2218,7 @@ int RGWRados::time_log_list(const string& oid, utime_t& start_time, utime_t& end
   librados::IoCtx io_ctx;
 
   const char *log_pool = zone.log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(log_pool, io_ctx);
   if (r < 0)
     return r;
@@ -2204,6 +2241,7 @@ int RGWRados::time_log_info(const string& oid, cls_log_header *header)
   librados::IoCtx io_ctx;
 
   const char *log_pool = zone.log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(log_pool, io_ctx);
   if (r < 0)
     return r;
@@ -2226,6 +2264,7 @@ int RGWRados::time_log_trim(const string& oid, const utime_t& start_time, const 
   librados::IoCtx io_ctx;
 
   const char *log_pool = zone.log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(log_pool, io_ctx);
   if (r < 0)
     return r;
@@ -2240,6 +2279,7 @@ int RGWRados::lock_exclusive(rgw_bucket& pool, const string& oid, utime_t& durat
 
   const char *pool_name = pool.name.c_str();
   
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(pool_name, io_ctx);
   if (r < 0)
     return r;
@@ -2258,6 +2298,7 @@ int RGWRados::unlock(rgw_bucket& pool, const string& oid, string& zone_id, strin
 
   const char *pool_name = pool.name.c_str();
 
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(pool_name, io_ctx);
   if (r < 0)
     return r;
@@ -2479,6 +2520,7 @@ int RGWRados::create_pool(rgw_bucket& bucket)
 
   string pool = bucket.index_pool;
 
+  librados::Rados *rados = get_rados_handle();
   ret = rados->pool_create(pool.c_str(), 0);
   if (ret == -EEXIST)
     ret = 0;
@@ -2542,6 +2584,7 @@ int RGWRados::create_bucket(RGWUserInfo& owner, rgw_bucket& bucket,
     const string& pool = zone.domain_root.name;
     const char *pool_str = pool.c_str();
     librados::IoCtx id_io_ctx;
+    librados::Rados *rados = get_rados_handle();
     int r = rados->ioctx_create(pool_str, id_io_ctx);
     if (r < 0)
       return r;
@@ -2828,6 +2871,7 @@ int RGWRados::update_placement_map()
 
 int RGWRados::add_bucket_placement(std::string& new_pool)
 {
+  librados::Rados *rados = get_rados_handle();
   int ret = rados->pool_lookup(new_pool.c_str());
   if (ret < 0) // DNE, or something
     return ret;
@@ -2878,6 +2922,7 @@ int RGWRados::create_pools(vector<string>& names, vector<int>& retcodes)
   vector<librados::PoolAsyncCompletion *> completions;
   vector<int> rets;
 
+  librados::Rados *rados = get_rados_handle();
   for (iter = names.begin(); iter != names.end(); ++iter) {
     librados::PoolAsyncCompletion *c = librados::Rados::pool_async_create_completion();
     completions.push_back(c);
@@ -7156,6 +7201,7 @@ int RGWRados::append_async(rgw_obj& obj, size_t size, bufferlist& bl)
   if (r < 0) {
     return r;
   }
+  librados::Rados *rados = get_rados_handle();
   librados::AioCompletion *completion = rados->aio_create_completion(NULL, NULL, NULL);
 
   r = ref.ioctx.aio_append(ref.oid, completion, bl, size);
@@ -7708,6 +7754,7 @@ int RGWRados::cls_obj_usage_log_add(const string& oid, rgw_usage_log_info& info)
   librados::IoCtx io_ctx;
 
   const char *usage_log_pool = zone.usage_log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(usage_log_pool, io_ctx);
   if (r == -ENOENT) {
     rgw_bucket pool(usage_log_pool);
@@ -7736,6 +7783,7 @@ int RGWRados::cls_obj_usage_log_read(string& oid, string& user, uint64_t start_e
   *is_truncated = false;
 
   const char *usage_log_pool = zone.usage_log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(usage_log_pool, io_ctx);
   if (r < 0)
     return r;
@@ -7751,6 +7799,7 @@ int RGWRados::cls_obj_usage_log_trim(string& oid, string& user, uint64_t start_e
   librados::IoCtx io_ctx;
 
   const char *usage_log_pool = zone.usage_log_pool.name.c_str();
+  librados::Rados *rados = get_rados_handle();
   int r = rados->ioctx_create(usage_log_pool, io_ctx);
   if (r < 0)
     return r;
@@ -8244,7 +8293,7 @@ string RGWStateLog::get_oid(const string& object) {
 int RGWStateLog::open_ioctx(librados::IoCtx& ioctx) {
   string pool_name;
   store->get_log_pool_name(pool_name);
-  int r = store->rados->ioctx_create(pool_name.c_str(), ioctx);
+  int r = store->get_rados_handle()->ioctx_create(pool_name.c_str(), ioctx);
   if (r < 0) {
     lderr(store->ctx()) << "ERROR: could not open rados pool" << dendl;
     return r;
@@ -8488,7 +8537,7 @@ int RGWOpStateSingleOp::renew_state() {
 
 uint64_t RGWRados::instance_id()
 {
-  return rados->get_instance_id();
+  return get_rados_handle()->get_instance_id();
 }
 
 uint64_t RGWRados::next_bucket_id()
@@ -8538,5 +8587,26 @@ void RGWStoreManager::close_storage(RGWRados *store)
   store->finalize();
 
   delete store;
+}
+
+librados::Rados* RGWRados::get_rados_handle()
+{
+  if (num_rados_handles == 1) {
+    return rados[0];
+  } else {
+    pthread_t id = pthread_self();
+    std::map<pthread_t, int>:: iterator it = rados_map.find(id);
+
+    if (it != rados_map.end()) {
+      return rados[it->second];
+    } else {
+      Mutex::Locker l(handle_lock);
+      if (next_rados_handle == num_rados_handles) {
+        next_rados_handle = 0;
+      }
+      rados_map[id] = next_rados_handle;
+      return rados[next_rados_handle++];
+    }
+  }
 }
 
